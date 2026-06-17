@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VideoPress — Compressor</title>
+
+  <!-- FFmpeg.wasm UMD builds — no dynamic import needed -->
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/umd/ffmpeg.js"></script>
+  <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d1117;
+      --surface:   #161b22;
+      --surface2:  #1c2330;
+      --border:    #30363d;
+      --cyan:      #00e5ff;
+      --cyan-dim:  #00b4cc;
+      --cyan-glow: rgba(0,229,255,0.12);
+      --green:     #39d353;
+      --red:       #f85149;
+      --amber:     #e3b341;
+      --text:      #e6edf3;
+      --muted:     #7d8590;
+      --mono:      'JetBrains Mono', monospace;
+      --sans:      'Inter', sans-serif;
+    }
+
+    body {
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px 60px;
+    }
+
+    /* ── Header ── */
+    header {
+      width: 100%; max-width: 780px;
+      margin-bottom: 36px;
+      display: flex; align-items: baseline; gap: 14px;
+    }
+    .logo { font-family: var(--mono); font-size: 22px; font-weight: 500; color: var(--cyan); }
+    .logo span { color: var(--muted); }
+    .tagline { font-size: 13px; color: var(--muted); font-weight: 300; }
+
+    /* ── Loading overlay ── */
+    #overlay {
+      position: fixed; inset: 0;
+      background: rgba(13,17,23,0.94);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px;
+      z-index: 200;
+      transition: opacity 0.3s;
+    }
+    #overlay.hidden { opacity: 0; pointer-events: none; }
+    .spinner {
+      width: 42px; height: 42px;
+      border: 3px solid var(--border);
+      border-top-color: var(--cyan);
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #overlay-title { font-size: 15px; color: var(--text); font-weight: 500; }
+    #overlay-sub   { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+    #overlay-error { font-size: 13px; color: var(--red); max-width: 460px; text-align: center; line-height: 1.6; display: none; }
+
+    /* ── Drop Zone ── */
+    .drop-zone {
+      width: 100%; max-width: 780px;
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 52px 32px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+      background: var(--surface);
+    }
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--cyan); background: var(--cyan-glow);
+    }
+    .drop-zone input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+    .drop-icon { width: 52px; height: 52px; margin: 0 auto 16px; }
+    .drop-icon svg { width: 52px; height: 52px; stroke: var(--cyan); fill: none; }
+    .drop-title { font-size: 17px; font-weight: 500; margin-bottom: 8px; }
+    .drop-subtitle { font-size: 13px; color: var(--muted); }
+    .drop-subtitle strong { color: var(--cyan); font-weight: 500; }
+
+    /* ── Settings Bar ── */
+    .settings-bar {
+      width: 100%; max-width: 780px;
+      margin-top: 18px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 20px;
+      display: flex; align-items: center; gap: 28px; flex-wrap: wrap;
+    }
+    .setting-group { display: flex; align-items: center; gap: 10px; }
+    .setting-label { font-size: 12px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+    select {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text);
+      font-family: var(--mono); font-size: 13px;
+      padding: 5px 10px; cursor: pointer; outline: none;
+    }
+    select:focus { border-color: var(--cyan); }
+    input[type="range"] {
+      -webkit-appearance: none;
+      width: 110px; height: 4px;
+      background: var(--border); border-radius: 2px; cursor: pointer;
+      border: none; outline: none; padding: 0;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px; height: 14px;
+      background: var(--cyan); border-radius: 50%; cursor: pointer;
+    }
+    .crf-value { font-family: var(--mono); font-size: 13px; color: var(--cyan); min-width: 24px; }
+
+    /* ── Queue ── */
+    .queue { width: 100%; max-width: 780px; margin-top: 18px; display: flex; flex-direction: column; gap: 10px; }
+    .queue-header { display: flex; justify-content: space-between; align-items: center; padding: 0 2px; }
+    .queue-count { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+    .btn-clear {
+      background: none; border: none; color: var(--muted); font-size: 12px;
+      cursor: pointer; font-family: var(--sans); padding: 4px 8px;
+      border-radius: 4px; transition: color 0.15s, background 0.15s;
+    }
+    .btn-clear:hover { color: var(--red); background: rgba(248,81,73,0.1); }
+
+    .file-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 16px;
+      display: grid; grid-template-columns: 36px 1fr auto;
+      align-items: center; gap: 12px;
+      transition: border-color 0.25s;
+    }
+    .file-card.compressing { border-color: var(--cyan); }
+    .file-card.done        { border-color: var(--green); }
+    .file-card.error       { border-color: var(--red); }
+
+    .file-icon {
+      width: 36px; height: 36px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-family: var(--mono); font-size: 9px; font-weight: 500; letter-spacing: 0.5px;
+    }
+    .file-icon.mkv { background: rgba(0,229,255,0.12); color: var(--cyan); }
+    .file-icon.mp4 { background: rgba(57,211,83,0.12); color: var(--green); }
+
+    .file-info { min-width: 0; }
+    .file-name {
+      font-family: var(--mono); font-size: 13px; font-weight: 500;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px;
+    }
+    .file-meta { font-size: 11px; color: var(--muted); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .size-badge { font-family: var(--mono); }
+    .savings { font-weight: 500; }
+
+    .progress-track {
+      height: 3px; background: var(--border); border-radius: 2px;
+      margin-top: 8px; overflow: hidden; display: none;
+    }
+    .file-card.compressing .progress-track,
+    .file-card.done .progress-track { display: block; }
+    .progress-fill {
+      height: 100%; width: 0%; border-radius: 2px;
+      background: linear-gradient(90deg, var(--cyan), var(--cyan-dim));
+      transition: width 0.4s ease;
+    }
+    .file-card.done .progress-fill {
+      width: 100% !important;
+      background: linear-gradient(90deg, var(--green), #28a745);
+    }
+    .file-card.error .progress-fill { background: var(--red); }
+
+    .file-action { display: flex; gap: 8px; align-items: center; }
+    .btn-remove {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      padding: 4px; border-radius: 4px; line-height: 1;
+      transition: color 0.15s; font-size: 14px;
+    }
+    .btn-remove:hover { color: var(--red); }
+    .btn-download {
+      background: rgba(57,211,83,0.15); border: 1px solid var(--green);
+      color: var(--green); font-size: 11px; font-weight: 500;
+      padding: 5px 12px; border-radius: 6px; cursor: pointer;
+      font-family: var(--sans); white-space: nowrap;
+      transition: background 0.15s; text-decoration: none; display: inline-block;
+    }
+    .btn-download:hover { background: rgba(57,211,83,0.28); }
+
+    .status-chip {
+      font-size: 11px; font-family: var(--mono);
+      padding: 3px 8px; border-radius: 4px; font-weight: 500; white-space: nowrap;
+    }
+    .status-chip.waiting     { background: rgba(125,133,144,0.15); color: var(--muted); }
+    .status-chip.compressing { background: rgba(0,229,255,0.12); color: var(--cyan); }
+    .status-chip.done        { background: rgba(57,211,83,0.12); color: var(--green); }
+    .status-chip.error       { background: rgba(248,81,73,0.12); color: var(--red); }
+
+    /* ── Footer ── */
+    .action-footer {
+      width: 100%; max-width: 780px;
+      margin-top: 22px;
+      display: none; align-items: center; gap: 14px; flex-wrap: wrap;
+    }
+    .action-footer.visible { display: flex; }
+    .btn-compress {
+      background: var(--cyan); color: #000;
+      border: none; padding: 12px 32px; border-radius: 8px;
+      font-family: var(--sans); font-size: 14px; font-weight: 600;
+      cursor: pointer; transition: background 0.15s, transform 0.1s; letter-spacing: 0.2px;
+    }
+    .btn-compress:hover:not(:disabled) { background: var(--cyan-dim); }
+    .btn-compress:active:not(:disabled) { transform: scale(0.98); }
+    .btn-compress:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-dl-all {
+      background: none; border: 1px solid var(--green); color: var(--green);
+      padding: 12px 24px; border-radius: 8px;
+      font-family: var(--sans); font-size: 14px; font-weight: 500;
+      cursor: pointer; transition: background 0.15s; display: none;
+    }
+    .btn-dl-all.visible { display: block; }
+    .btn-dl-all:hover { background: rgba(57,211,83,0.12); }
+    .overall-info { font-size: 13px; color: var(--muted); font-family: var(--mono); margin-left: auto; }
+    .overall-info strong { color: var(--green); }
+
+    /* ── Notice ── */
+    .notice {
+      width: 100%; max-width: 780px; margin-top: 28px;
+      background: rgba(227,179,65,0.07); border: 1px solid rgba(227,179,65,0.22);
+      border-radius: 8px; padding: 12px 16px;
+      font-size: 12px; color: var(--amber); line-height: 1.6;
+    }
+    .notice strong { font-weight: 600; }
+
+    @media (max-width: 560px) {
+      .file-card { grid-template-columns: 28px 1fr; }
+      .file-action { grid-column: 1 / -1; justify-content: flex-end; }
+      .overall-info { margin-left: 0; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Loading / Error overlay -->
+<div id="overlay">
+  <div class="spinner" id="overlaySpinner"></div>
+  <div id="overlay-title">Loading FFmpeg engine…</div>
+  <div id="overlay-sub">~25 MB · one-time download</div>
+  <div id="overlay-error"></div>
+</div>
+
+<header>
+  <div class="logo">video<span>/</span>press</div>
+  <div class="tagline">client-side .mkv &amp; .mp4 compressor — nothing leaves your browser</div>
+</header>
+
+<!-- Drop Zone -->
+<div class="drop-zone" id="dropZone">
+  <input type="file" id="fileInput" accept=".mkv,.mp4,video/x-matroska,video/mp4" multiple />
+  <div class="drop-icon">
+    <svg viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+    </svg>
+  </div>
+  <div class="drop-title">Drop .mkv or .mp4 files here</div>
+  <div class="drop-subtitle">or <strong>click to browse</strong> — select as many as you like</div>
+</div>
+
+<!-- Settings -->
+<div class="settings-bar">
+  <div class="setting-group">
+    <span class="setting-label">Quality (CRF)</span>
+    <input type="range" id="crfSlider" min="18" max="40" value="28" step="1" />
+    <span class="crf-value" id="crfValue">28</span>
+  </div>
+  <div class="setting-group">
+    <span class="setting-label">Speed Preset</span>
+    <select id="presetSelect">
+      <option value="ultrafast">ultrafast (fastest)</option>
+      <option value="superfast">superfast</option>
+      <option value="veryfast">veryfast</option>
+      <option value="faster">faster</option>
+      <option value="fast">fast</option>
+      <option value="medium" selected>medium</option>
+      <option value="slow">slow (best compression)</option>
+    </select>
+  </div>
+  <div class="setting-group">
+    <span class="setting-label">Output</span>
+    <select id="outputFormat">
+      <option value="mp4">MP4</option>
+      <option value="mkv">MKV</option>
+    </select>
+  </div>
+</div>
+
+<!-- File Queue -->
+<div class="queue" id="fileQueue"></div>
+
+<!-- Footer -->
+<div class="action-footer" id="actionFooter">
+  <button class="btn-compress" id="btnCompress" disabled>⚡ Compress All</button>
+  <button class="btn-dl-all" id="btnDlAll">↓ Download All</button>
+  <div class="overall-info" id="overallInfo"></div>
+</div>
+
+<div class="notice">
+  <strong>🔒 100% private.</strong> FFmpeg runs entirely in your browser via WebAssembly — no files are uploaded anywhere.
+  Higher CRF = smaller file / lower quality. <strong>CRF 28–35</strong> is the sweet spot for maximum compression.
+  Large files (&gt;500 MB) may take several minutes depending on your CPU.
+</div>
+
+<script>
+(async function () {
+  // ── Grab globals from UMD scripts ─────────────────────────────────
+  const { FFmpeg } = window.FFmpegWASM || {};
+  const utilLib    = window.FFmpegUtil  || {};
+  const { fetchFile, toBlobURL } = utilLib;
+
+  if (!FFmpeg || !fetchFile || !toBlobURL) {
+    showError('FFmpeg library failed to load. Please check your internet connection and reload.');
+    return;
+  }
+
+  // ── Load FFmpeg core ───────────────────────────────────────────────
+  const ffmpeg  = new FFmpeg();
+  const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+
+  try {
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`,   'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+    });
+  } catch (err) {
+    showError(`Failed to load FFmpeg core: ${err.message}.\n\nThis tool requires a modern browser (Chrome 92+ / Firefox 90+) opened over HTTPS or localhost. Opening as a local file:// may block SharedArrayBuffer.`);
+    return;
+  }
+
+  // Hide overlay
+  document.getElementById('overlay').classList.add('hidden');
+
+  // ── State & Elements ───────────────────────────────────────────────
+  const files = [];
+  let isRunning = false;
+
+  const dropZone    = document.getElementById('dropZone');
+  const fileInput   = document.getElementById('fileInput');
+  const fileQueue   = document.getElementById('fileQueue');
+  const actionFooter= document.getElementById('actionFooter');
+  const btnCompress = document.getElementById('btnCompress');
+  const btnDlAll    = document.getElementById('btnDlAll');
+  const overallInfo = document.getElementById('overallInfo');
+  const crfSlider   = document.getElementById('crfSlider');
+  const crfValue    = document.getElementById('crfValue');
+
+  crfSlider.addEventListener('input', () => { crfValue.textContent = crfSlider.value; });
+
+  // ── Drop zone events ───────────────────────────────────────────────
+  dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault(); dropZone.classList.remove('drag-over');
+    handleFiles([...e.dataTransfer.files]);
+  });
+  fileInput.addEventListener('change', () => { handleFiles([...fileInput.files]); fileInput.value = ''; });
+
+  function handleFiles(incoming) {
+    const allowed = incoming.filter(f => /\.(mkv|mp4)$/i.test(f.name));
+    if (!allowed.length) return;
+    allowed.forEach(f => {
+      files.push({ file: f, id: uid(), status: 'waiting', outputBlob: null, outputName: null, compressedSize: 0 });
+    });
+    renderQueue();
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────
+  function renderQueue() {
+    fileQueue.innerHTML = '';
+
+    if (!files.length) {
+      actionFooter.classList.remove('visible');
+      return;
+    }
+    actionFooter.classList.add('visible');
+
+    // Header row
+    const hdr = el('div', 'queue-header');
+    hdr.innerHTML = `<span class="queue-count">${files.length} file${files.length !== 1 ? 's' : ''} queued</span>`;
+    const clearBtn = el('button', 'btn-clear');
+    clearBtn.textContent = 'Clear all';
+    clearBtn.addEventListener('click', () => { if (!isRunning) { files.length = 0; renderQueue(); } });
+    hdr.appendChild(clearBtn);
+    fileQueue.appendChild(hdr);
+
+    files.forEach(entry => {
+      const ext  = entry.file.name.split('.').pop().toLowerCase();
+      const card = el('div', `file-card ${entry.status}`);
+      card.id = `card-${entry.id}`;
+
+      // Icon
+      const icon = el('div', `file-icon ${ext}`);
+      icon.textContent = ext.toUpperCase();
+      card.appendChild(icon);
+
+      // Info
+      const info = el('div', 'file-info');
+      const name = el('div', 'file-name');
+      name.textContent = entry.file.name;
+
+      const meta = el('div', 'file-meta');
+      const sizeBadge = el('span', 'size-badge');
+      sizeBadge.textContent = fmtSize(entry.file.size);
+      const savingsSpan = el('span', 'savings');
+      savingsSpan.id = `savings-${entry.id}`;
+      if (entry.status === 'done' && entry.compressedSize) {
+        const pct = ((1 - entry.compressedSize / entry.file.size) * 100).toFixed(1);
+        savingsSpan.textContent = `-${pct}% → ${fmtSize(entry.compressedSize)}`;
+        savingsSpan.style.color = 'var(--green)';
+      }
+      meta.append(sizeBadge, savingsSpan);
+
+      const track = el('div', 'progress-track');
+      const fill  = el('div', 'progress-fill');
+      fill.id = `prog-${entry.id}`;
+      track.appendChild(fill);
+
+      info.append(name, meta, track);
+      card.appendChild(info);
+
+      // Actions
+      const actions = el('div', 'file-action');
+
+      const chip = el('span', `status-chip ${entry.status}`);
+      chip.id = `chip-${entry.id}`;
+      chip.textContent = chipLabel(entry.status);
+      actions.appendChild(chip);
+
+      if (entry.status !== 'compressing') {
+        const removeBtn = el('button', 'btn-remove');
+        removeBtn.title = 'Remove';
+        removeBtn.textContent = '✕';
+        removeBtn.addEventListener('click', () => {
+          if (isRunning) return;
+          files.splice(files.findIndex(f => f.id === entry.id), 1);
+          renderQueue();
+        });
+        actions.appendChild(removeBtn);
+      }
+
+      if (entry.outputBlob) {
+        const dlLink = el('a', 'btn-download');
+        dlLink.id       = `dl-${entry.id}`;
+        dlLink.textContent = '↓ Save';
+        dlLink.download = entry.outputName;
+        dlLink.href     = URL.createObjectURL(entry.outputBlob);
+        actions.appendChild(dlLink);
+      }
+
+      card.appendChild(actions);
+      fileQueue.appendChild(card);
+    });
+
+    // Footer buttons
+    const waitingCount = files.filter(f => f.status === 'waiting').length;
+    const doneCount    = files.filter(f => f.status === 'done').length;
+    btnCompress.disabled = isRunning || waitingCount === 0;
+    btnDlAll.classList.toggle('visible', doneCount > 0);
+    updateOverallInfo();
+  }
+
+  function updateCard(entry) {
+    const card = document.getElementById(`card-${entry.id}`);
+    if (!card) return;
+    card.className = `file-card ${entry.status}`;
+
+    const chip = document.getElementById(`chip-${entry.id}`);
+    if (chip) { chip.className = `status-chip ${entry.status}`; chip.textContent = chipLabel(entry.status); }
+
+    if (entry.status === 'done' && entry.outputBlob) {
+      const savings = document.getElementById(`savings-${entry.id}`);
+      if (savings && entry.compressedSize) {
+        const pct = ((1 - entry.compressedSize / entry.file.size) * 100).toFixed(1);
+        savings.textContent = `-${pct}% → ${fmtSize(entry.compressedSize)}`;
+        savings.style.color = 'var(--green)';
+      }
+      // Add download link if missing
+      const existingDl = document.getElementById(`dl-${entry.id}`);
+      if (!existingDl) {
+        const actionsEl = card.querySelector('.file-action');
+        const dlLink = el('a', 'btn-download');
+        dlLink.id        = `dl-${entry.id}`;
+        dlLink.textContent = '↓ Save';
+        dlLink.download  = entry.outputName;
+        dlLink.href      = URL.createObjectURL(entry.outputBlob);
+        actionsEl.appendChild(dlLink);
+      }
+    }
+
+    const doneCount    = files.filter(f => f.status === 'done').length;
+    const waitingCount = files.filter(f => f.status === 'waiting').length;
+    btnCompress.disabled = isRunning || waitingCount === 0;
+    btnDlAll.classList.toggle('visible', doneCount > 0);
+    updateOverallInfo();
+  }
+
+  function updateOverallInfo() {
+    const done = files.filter(f => f.status === 'done');
+    if (!done.length) { overallInfo.innerHTML = ''; return; }
+    const origTotal = done.reduce((a, f) => a + f.file.size, 0);
+    const newTotal  = done.reduce((a, f) => a + f.compressedSize, 0);
+    const pct = origTotal ? ((1 - newTotal / origTotal) * 100).toFixed(1) : 0;
+    overallInfo.innerHTML = `${done.length} compressed · saved <strong>${pct}%</strong> total`;
+  }
+
+  // ── Compress ───────────────────────────────────────────────────────
+  btnCompress.addEventListener('click', compressAll);
+
+  async function compressAll() {
+    if (isRunning) return;
+    isRunning = true;
+    btnCompress.disabled = true;
+
+    const crf    = crfSlider.value;
+    const preset = document.getElementById('presetSelect').value;
+    const fmt    = document.getElementById('outputFormat').value;
+
+    for (const entry of files) {
+      if (entry.status !== 'waiting') continue;
+
+      entry.status = 'compressing';
+      updateCard(entry);
+
+      const ext    = entry.file.name.split('.').pop().toLowerCase();
+      const inName  = `in_${entry.id}.${ext}`;
+      const outName = `out_${entry.id}.${fmt}`;
+
+      try {
+        // Write input file to ffmpeg FS
+        await ffmpeg.writeFile(inName, await fetchFile(entry.file));
+
+        // Progress listener
+        const progressHandler = ({ progress }) => {
+          const pct = Math.min(Math.round(progress * 100), 99);
+          const bar = document.getElementById(`prog-${entry.id}`);
+          if (bar) bar.style.width = pct + '%';
+        };
+        ffmpeg.on('progress', progressHandler);
+
+        // Run compression
+        await ffmpeg.exec([
+          '-i', inName,
+          '-c:v', 'libx264',
+          '-crf', String(crf),
+          '-preset', preset,
+          '-c:a', 'aac',
+          '-b:a', '128k',
+          '-movflags', '+faststart',
+          outName
+        ]);
+
+        ffmpeg.off('progress', progressHandler);
+
+        // Read output
+        const data = await ffmpeg.readFile(outName);
+        const mime = fmt === 'mp4' ? 'video/mp4' : 'video/x-matroska';
+        const blob = new Blob([data.buffer], { type: mime });
+
+        const stem = entry.file.name.replace(/\.[^.]+$/, '');
+        entry.outputBlob     = blob;
+        entry.outputName     = `${stem}_compressed.${fmt}`;
+        entry.compressedSize = blob.size;
+        entry.status         = 'done';
+
+        // Cleanup ffmpeg FS
+        try { await ffmpeg.deleteFile(inName); }  catch(_) {}
+        try { await ffmpeg.deleteFile(outName); } catch(_) {}
+
+      } catch (err) {
+        console.error('Compression error:', err);
+        entry.status = 'error';
+        try { await ffmpeg.deleteFile(inName); }  catch(_) {}
+        try { await ffmpeg.deleteFile(outName); } catch(_) {}
+      }
+
+      updateCard(entry);
+    }
+
+    isRunning = false;
+    renderQueue();
+  }
+
+  // ── Download All ───────────────────────────────────────────────────
+  btnDlAll.addEventListener('click', () => {
+    files.filter(f => f.status === 'done' && f.outputBlob).forEach(f => {
+      const a  = document.createElement('a');
+      a.href   = URL.createObjectURL(f.outputBlob);
+      a.download = f.outputName;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => document.body.removeChild(a), 100);
+    });
+  });
+
+  // ── Helpers ────────────────────────────────────────────────────────
+  function uid() { return Math.random().toString(36).slice(2, 10); }
+  function el(tag, cls) { const e = document.createElement(tag); e.className = cls; return e; }
+  function fmtSize(b) {
+    if (b < 1024)      return b + ' B';
+    if (b < 1024**2)   return (b / 1024).toFixed(1) + ' KB';
+    if (b < 1024**3)   return (b / 1024**2).toFixed(2) + ' MB';
+    return (b / 1024**3).toFixed(2) + ' GB';
+  }
+  function chipLabel(s) {
+    return { waiting: 'waiting', compressing: 'compressing…', done: 'done', error: 'error' }[s] || s;
+  }
+
+  function showError(msg) {
+    document.getElementById('overlaySpinner').style.display = 'none';
+    document.getElementById('overlay-title').style.display = 'none';
+    document.getElementById('overlay-sub').style.display   = 'none';
+    const errEl = document.getElementById('overlay-error');
+    errEl.style.display   = 'block';
+    errEl.textContent     = msg;
+  }
+})();
+</script>
+</body>
+</html>
